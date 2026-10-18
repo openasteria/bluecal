@@ -3,35 +3,77 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# --- Автоустановка зависимостей (Debian/Ubuntu и Arch) ---
-need_pkgs=()
-command -v cmake   >/dev/null 2>&1 || need_pkgs+=(cmake)
-command -v g++     >/dev/null 2>&1 || command -v c++ >/dev/null 2>&1 || need_pkgs+=(g++)
-command -v make    >/dev/null 2>&1 || need_pkgs+=(make)
-# ncursesw и libnotify — проверяем по заголовкам/pc-файлам
-if ! ls /usr/include/*/curses.h /usr/include/curses.h >/dev/null 2>&1; then
-    need_pkgs+=(libncursesw5-dev)
+# --- Автоустановка зависимостей (Debian/Ubuntu, Arch, Fedora/openSUSE) ---
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v sudo >/dev/null 2>&1; then SUDO="sudo"
+    else echo "Нет root и нет sudo. Установите пакеты вручную."; exit 1; fi
 fi
-if ! pkg-config --exists libnotify >/dev/null 2>&1; then
-    need_pkgs+=(libnotify-dev)
-fi
-if [ ${#need_pkgs[@]} -gt 0 ]; then
-    echo "[0/4] Установка зависимостей: ${need_pkgs[*]}"
+
+apt_install_pkg() {  # $1 = имя пакета; ставит только если реально доступен в репозитории
+    apt-cache show "$1" >/dev/null 2>&1 || return 1
+    $SUDO apt-get install -y "$1"
+}
+
+apt_updated=0
+apt_update_once() {
+    if [ "$apt_updated" = "0" ]; then
+        # ВАЖНО: без «apt-get update» на свежей системе списки пакетов пусты —
+        # отсюда ошибка «E: Unable to locate package …»
+        $SUDO apt-get update
+        apt_updated=1
+    fi
+}
+
+have_toolchain() {
+    command -v cc   >/dev/null 2>&1 && \
+    command -v make >/dev/null 2>&1 && \
+    command -v cmake >/dev/null 2>&1
+}
+
+have_libs() {
+    ls /usr/include/curses.h /usr/include/*/curses.h >/dev/null 2>&1 && \
+    pkg-config --exists libnotify >/dev/null 2>&1
+}
+
+if ! have_toolchain || ! have_libs; then
+    echo "[0/4] Установка зависимостей…"
     if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update
-        # в новых Debian пакет libncursesw5-dev переименован в libncurses-dev
-        pkgs=("${need_pkgs[@]}")
-        if apt-get --no-install-recommends install -y --dry-run libncurses-dev >/dev/null 2>&1 \
-           && ! apt-cache show libncursesw5-dev >/dev/null 2>&1; then
-            pkgs=("${pkgs[@]/libncursesw5-dev/libncurses-dev}")
+        apt_update_once
+        have_toolchain || {
+            apt_install_pkg build-essential || apt_install_pkg clang || true
+            apt_install_pkg make  || true
+            apt_install_pkg cmake || true
+        }
+        if ! have_libs; then
+            # в Debian 12+ libncursesw5-dev переименован в libncurses-dev — пробуем оба
+            apt_install_pkg libncurses-dev || apt_install_pkg libncursesw5-dev || true
+            apt_install_pkg libnotify-dev || true
         fi
-        sudo apt-get install -y "${pkgs[@]}"
     elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --noconfirm base-devel ncurses libnotify
+        $SUDO pacman -Sy --noconfirm base-devel cmake ncurses libnotify
+    elif command -v dnf >/dev/null 2>&1; then
+        $SUDO dnf install -y gcc-c++ make cmake ncurses-devel libnotify-devel
+    elif command -v zypper >/dev/null 2>&1; then
+        $SUDO zypper --non-interactive install patterns-devel-base-devel_basis cmake \
+            libncursesw-devel libnotify-devel
     else
-        echo "Не удалось определить менеджер пакетов. Установите вручную: ${need_pkgs[*]}"
+        echo "Не удалось определить менеджер пакетов."
         exit 1
     fi
+fi
+
+# Финальная проверка: если чего-то всё ещё нет — понятная ошибка вместо cryptic fail
+missing=""
+command -v cmake  >/dev/null 2>&1 || missing="$missing cmake"
+ls /usr/include/curses.h /usr/include/*/curses.h >/dev/null 2>&1 || missing="$missing libncurses-dev"
+pkg-config --exists libnotify >/dev/null 2>&1 || missing="$missing libnotify-dev"
+if [ -n "$missing" ]; then
+    echo "ОШИБКА: не удалось установить:$missing"
+    echo "Проверьте интернет и что в источниках (/etc/apt/sources.list или sources.list.d)"
+    echo "подключен компонент main, затем повторите: ./scripts/install.sh"
+    exit 1
 fi
 
 echo "[1/4] Сборка (cmake + make)…"
