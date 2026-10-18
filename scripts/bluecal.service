@@ -1,0 +1,12 @@
+[Unit]
+Description=bluecal reminder daemon (desktop notifications for calendar reminders)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/bluecal-reminderd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# bluecal-reminderd — фоновый демон напоминаний для bluecal.
+# Читает ~/.config/bluecal/data.json и отправляет desktop-уведомления
+# (notify-send / mako / dunst) в нужное время. Совместим со swaywm:
+# уведомления идут через org.freedesktop.Notifications по D-Bus,
+# который в sway обычно обслуживает mako или dunst.
+#
+# Запуск как user-сервис systemd: см. scripts/bluecal.service
+set -u
+
+DATA="${XDG_CONFIG_HOME:-$HOME/.config}/bluecal/data.json"
+STATE="${XDG_CONFIG_HOME:-$HOME/.config}/bluecal/notified.ids"
+INTERVAL="${BLUECAL_NOTIFY_INTERVAL:-30}"
+
+mkdir -p "$(dirname "$STATE")"
+touch "$STATE"
+
+notify() {
+    local title="$1" body="$2"
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send --app-name="bluecal" "$title" "$body" || true
+    elif command -v gdbus >/dev/null 2>&1; then
+        gdbus call --session --dest org.freedesktop.Notifications \
+            --object-path /org/freedesktop/Notifications \
+            --method org.freedesktop.Notifications.Notify \
+            "bluecal" 0 "" "$title" "$body" '[]' "{}" 10000 >/dev/null 2>&1 || true
+    fi
+}
+
+while :; do
+    if [ -f "$DATA" ]; then
+        NOW="$(date '+%Y-%m-%d %H:%M')"
+        # python3 помечает сработавшие id в state-файле и печатает "title<TAB>datetime"
+        while IFS=$'\t' read -r title dt; do
+            [ -n "${title:-}" ] && notify "⏰ Напоминание: $title" "$dt"
+        done < <(python3 - "$DATA" "$STATE" "$NOW" <<'PY'
+import json, sys, os
+data_path, state_path, now = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(data_path, encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+
+done = set()
+if os.path.exists(state_path):
+    with open(state_path, encoding="utf-8") as f:
+        done = {int(x) for x in f.read().split() if x.strip().isdigit()}
+
+out = []
+for rm in data.get("reminders", []):
+    rid = int(rm.get("id", 0))
+    dt = rm.get("datetime", "")
+    if rid and dt and dt <= now and rid not in done:
+        out.append((rid, rm.get("title", "Напоминание"), dt))
+
+with open(state_path, "a", encoding="utf-8") as f:
+    for rid, _, _ in out:
+        f.write(f"{rid}\n")
+
+for _, title, dt in out:
+    print(f"{title}\t{dt}")
+PY
+        )
+    fi
+    sleep "$INTERVAL"
+done
